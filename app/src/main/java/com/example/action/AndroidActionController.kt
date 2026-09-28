@@ -137,23 +137,31 @@ class AndroidActionController(private val context: Context) {
      * Perform web search using Android's system SearchManager / Browser Intent.
      */
     fun searchWeb(query: String): Result<String> {
+        val trimmed = query.trim()
+        if (trimmed.isBlank()) {
+            return Result.failure(IllegalArgumentException("Search query cannot be empty"))
+        }
         return try {
             val intent = Intent(Intent.ACTION_WEB_SEARCH).apply {
-                putExtra(SearchManager.QUERY, query)
+                putExtra(SearchManager.QUERY, trimmed)
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
-            context.startActivity(intent)
-            Result.success("Searching for: $query")
-        } catch (_: Exception) {
-            try {
-                val browserIntent = Intent(Intent.ACTION_VIEW, Uri.parse("https://www.google.com/search?q=${Uri.encode(query)}")).apply {
+            if (intent.resolveActivity(context.packageManager) != null) {
+                context.startActivity(intent)
+                Result.success("Searching for: $trimmed")
+            } else {
+                val browserIntent = Intent(Intent.ACTION_VIEW, Uri.parse("https://www.google.com/search?q=${Uri.encode(trimmed)}")).apply {
                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 }
-                context.startActivity(browserIntent)
-                Result.success("Searched web for: $query")
-            } catch (e: Exception) {
-                Result.failure(e)
+                if (browserIntent.resolveActivity(context.packageManager) != null) {
+                    context.startActivity(browserIntent)
+                    Result.success("Searched web for: $trimmed")
+                } else {
+                    Result.failure(Exception("No web browser found on this device to perform search."))
+                }
             }
+        } catch (e: Exception) {
+            Result.failure(e)
         }
     }
 
@@ -161,13 +169,22 @@ class AndroidActionController(private val context: Context) {
      * Open a web URL directly in browser.
      */
     fun openWebsite(url: String): Result<String> {
-        val target = if (!url.startsWith("http://") && !url.startsWith("https://")) "https://$url" else url
+        val trimmed = url.trim()
+        if (trimmed.isBlank()) {
+            return Result.failure(IllegalArgumentException("URL cannot be empty"))
+        }
+        val target = if (!trimmed.startsWith("http://") && !trimmed.startsWith("https://")) "https://$trimmed" else trimmed
         return try {
-            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(target)).apply {
+            val uri = Uri.parse(target)
+            val intent = Intent(Intent.ACTION_VIEW, uri).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
-            context.startActivity(intent)
-            Result.success("Opened $target")
+            if (intent.resolveActivity(context.packageManager) != null) {
+                context.startActivity(intent)
+                Result.success("Opened $target")
+            } else {
+                Result.failure(Exception("No web browser available to open $target"))
+            }
         } catch (e: Exception) {
             Result.failure(e)
         }
@@ -177,19 +194,26 @@ class AndroidActionController(private val context: Context) {
      * Share text or content to other apps.
      */
     fun shareContent(title: String, text: String): Result<String> {
+        val trimmed = text.trim()
+        if (trimmed.isBlank()) {
+            return Result.failure(IllegalArgumentException("Share content cannot be empty"))
+        }
         return try {
             val sendIntent = Intent().apply {
                 action = Intent.ACTION_SEND
-                putExtra(Intent.EXTRA_TEXT, text)
+                putExtra(Intent.EXTRA_TEXT, trimmed)
                 putExtra(Intent.EXTRA_TITLE, title)
                 type = "text/plain"
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
             val chooser = Intent.createChooser(sendIntent, title).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
-            context.startActivity(chooser)
-            Result.success("Shared successfully")
+            if (sendIntent.resolveActivity(context.packageManager) != null) {
+                context.startActivity(chooser)
+                Result.success("Share dialog displayed")
+            } else {
+                Result.failure(Exception("No app available on this device to share content"))
+            }
         } catch (e: Exception) {
             Result.failure(e)
         }
@@ -262,12 +286,13 @@ class AndroidActionController(private val context: Context) {
      * Zip operation for native files.
      */
     fun zipFiles(targetName: String): Result<String> {
+        val safeName = targetName.trim().ifBlank { "archive" }.removeSuffix(".zip")
         return try {
-            val zipFile = File(context.filesDir, "$targetName.zip")
+            val zipFile = File(context.filesDir, "$safeName.zip")
             ZipOutputStream(FileOutputStream(zipFile)).use { out ->
                 val entry = ZipEntry("readme.txt")
                 out.putNextEntry(entry)
-                out.write("Archived by Maya Voice Assistant".toByteArray())
+                out.write("Archived by Maya Voice Assistant on ${System.currentTimeMillis()}".toByteArray())
                 out.closeEntry()
             }
             Result.success("Created archive ${zipFile.name}")

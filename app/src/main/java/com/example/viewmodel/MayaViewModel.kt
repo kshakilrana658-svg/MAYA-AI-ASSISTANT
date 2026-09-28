@@ -57,6 +57,7 @@ class MayaViewModel(application: Application) : AndroidViewModel(application) {
 
     private val db = MayaDatabase.getInstance(application)
     private val taskHistoryDao = db.taskHistoryDao()
+    private val settingsRepository = com.example.db.SettingsRepository(db.settingsDao())
     private val actionController = AndroidActionController(application)
     private val geminiService = GeminiAiService()
 
@@ -110,7 +111,20 @@ class MayaViewModel(application: Application) : AndroidViewModel(application) {
     init {
         _managedFiles.value = actionController.getInitialManagedFiles()
         initSpeechManager()
-        seedInitialHistory()
+        observePersistedSettings()
+    }
+
+    private fun observePersistedSettings() {
+        viewModelScope.launch {
+            settingsRepository.settingsFlow.collect { persisted ->
+                _userSettings.value = persisted
+                speechManager?.updateVoiceSettings(
+                    persisted.voiceSpeed,
+                    persisted.voicePitch,
+                    persisted.language
+                )
+            }
+        }
     }
 
     private fun initSpeechManager() {
@@ -128,43 +142,6 @@ class MayaViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         )
-    }
-
-    private fun seedInitialHistory() {
-        viewModelScope.launch {
-            // Seed a few initial demo task history entries if empty
-            val initial = listOf(
-                TaskHistoryItem(
-                    timestamp = System.currentTimeMillis() - 3600000 * 2,
-                    command = "Create Website",
-                    actionType = "AI_WORKSPACE",
-                    resultText = "Website scaffold generated with modern dark theme",
-                    isSuccess = true
-                ),
-                TaskHistoryItem(
-                    timestamp = System.currentTimeMillis() - 3600000 * 4,
-                    command = "Open Chrome",
-                    actionType = "APP_LAUNCH",
-                    resultText = "Launched Google Chrome",
-                    isSuccess = true
-                ),
-                TaskHistoryItem(
-                    timestamp = System.currentTimeMillis() - 3600000 * 6,
-                    command = "Find PDF files",
-                    actionType = "FILE_MANAGER",
-                    resultText = "Located 2 documents in storage",
-                    isSuccess = true
-                ),
-                TaskHistoryItem(
-                    timestamp = System.currentTimeMillis() - 3600000 * 8,
-                    command = "Open YouTube",
-                    actionType = "APP_LAUNCH",
-                    resultText = "Launched YouTube player",
-                    isSuccess = true
-                )
-            )
-            initial.forEach { taskHistoryDao.insert(it) }
-        }
     }
 
     fun navigateTo(route: ScreenRoute) {
@@ -285,11 +262,19 @@ class MayaViewModel(application: Application) : AndroidViewModel(application) {
                 is ParsedIntent.SearchWeb -> {
                     _mayaState.value = MayaState.WORKING
                     val result = actionController.searchWeb(intent.query)
-                    _mayaState.value = MayaState.SUCCESS
-                    val msg = if (isBangla) "\"${intent.query}\" লিখে অনুসন্ধান করা হয়েছে।" else "Searched web for: ${intent.query}"
-                    _lastMayaResponse.value = msg
-                    speakMaya(if (isBangla) "ওয়েবে খুঁজছি..." else "Searching for ${intent.query}")
-                    logTask(command, "WEB_SEARCH", msg, true)
+                    if (result.isSuccess) {
+                        _mayaState.value = MayaState.SUCCESS
+                        val msg = if (isBangla) "\"${intent.query}\" লিখে অনুসন্ধান করা হয়েছে।" else "Searched web for: ${intent.query}"
+                        _lastMayaResponse.value = msg
+                        speakMaya(if (isBangla) "ওয়েবে খুঁজছি..." else "Searching for ${intent.query}")
+                        logTask(command, "WEB_SEARCH", msg, true)
+                    } else {
+                        _mayaState.value = MayaState.ERROR
+                        val err = if (isBangla) "অনুসন্ধান শুরু করা যায়নি: কোনো ব্রাউজার পাওয়া যায়নি।" else (result.exceptionOrNull()?.message ?: "Search failed")
+                        _lastMayaResponse.value = err
+                        speakMaya(err)
+                        logTask(command, "WEB_SEARCH", err, false, err)
+                    }
                     delay(1500)
                     _mayaState.value = MayaState.SLEEPING
                 }
@@ -297,17 +282,27 @@ class MayaViewModel(application: Application) : AndroidViewModel(application) {
                 is ParsedIntent.OpenWebsite -> {
                     _mayaState.value = MayaState.WORKING
                     val result = actionController.openWebsite(intent.url)
-                    _mayaState.value = MayaState.SUCCESS
-                    val msg = if (isBangla) "ওয়েবসাইটটি ওপেন করা হয়েছে।" else "Opened ${intent.url}"
-                    _lastMayaResponse.value = msg
-                    speakMaya(msg)
-                    logTask(command, "WEB_BROWSER", msg, true)
+                    if (result.isSuccess) {
+                        _mayaState.value = MayaState.SUCCESS
+                        val msg = if (isBangla) "ওয়েবসাইটটি ওপেন করা হয়েছে।" else "Opened ${intent.url}"
+                        _lastMayaResponse.value = msg
+                        speakMaya(msg)
+                        logTask(command, "WEB_BROWSER", msg, true)
+                    } else {
+                        _mayaState.value = MayaState.ERROR
+                        val err = if (isBangla) "ওয়েবসাইটটি ওপেন করা যায়নি।" else (result.exceptionOrNull()?.message ?: "Failed to open website")
+                        _lastMayaResponse.value = err
+                        speakMaya(err)
+                        logTask(command, "WEB_BROWSER", err, false, err)
+                    }
                     delay(1500)
                     _mayaState.value = MayaState.SLEEPING
                 }
 
                 is ParsedIntent.ChangeWakePhrase -> {
-                    _userSettings.value = _userSettings.value.copy(wakePhrase = intent.newPhrase)
+                    val updated = _userSettings.value.copy(wakePhrase = intent.newPhrase)
+                    _userSettings.value = updated
+                    viewModelScope.launch { settingsRepository.saveSettings(updated) }
                     _mayaState.value = MayaState.SUCCESS
                     _lastMayaResponse.value = responseMessage
                     speakMaya(responseMessage)
@@ -317,7 +312,9 @@ class MayaViewModel(application: Application) : AndroidViewModel(application) {
                 }
 
                 is ParsedIntent.ChangeStopCommand -> {
-                    _userSettings.value = _userSettings.value.copy(stopCommand = intent.newCommand)
+                    val updated = _userSettings.value.copy(stopCommand = intent.newCommand)
+                    _userSettings.value = updated
+                    viewModelScope.launch { settingsRepository.saveSettings(updated) }
                     _mayaState.value = MayaState.SUCCESS
                     _lastMayaResponse.value = responseMessage
                     speakMaya(responseMessage)
@@ -336,7 +333,9 @@ class MayaViewModel(application: Application) : AndroidViewModel(application) {
                 }
 
                 is ParsedIntent.ChangeLanguage -> {
-                    _userSettings.value = _userSettings.value.copy(language = intent.language)
+                    val updated = _userSettings.value.copy(language = intent.language)
+                    _userSettings.value = updated
+                    viewModelScope.launch { settingsRepository.saveSettings(updated) }
                     speechManager?.updateVoiceSettings(
                         _userSettings.value.voiceSpeed,
                         _userSettings.value.voicePitch,
@@ -439,21 +438,31 @@ class MayaViewModel(application: Application) : AndroidViewModel(application) {
                 speakMaya(msg)
                 logTask(originalCommand, "FILE_CREATE", msg, true)
             }
-            "ZIP" -> {
-                actionController.zipFiles("archive")
-                val zipFile = ManagedFile(
-                    name = "archive.zip",
-                    size = "12.6 MB",
-                    category = FileCategory.ARCHIVES,
-                    dateModified = "Just now",
-                    path = "/storage/emulated/0/archive.zip"
-                )
-                _managedFiles.value = listOf(zipFile) + _managedFiles.value
-                _mayaState.value = MayaState.SUCCESS
-                val msg = "Created compressed archive.zip"
-                _lastMayaResponse.value = msg
-                speakMaya(msg)
-                logTask(originalCommand, "FILE_ZIP", msg, true)
+            "ZIP", "CREATE_ZIP" -> {
+                val safeTarget = target.ifBlank { "archive" }
+                val result = actionController.zipFiles(safeTarget)
+                if (result.isSuccess) {
+                    val zipName = "$safeTarget.zip"
+                    val zipFile = ManagedFile(
+                        name = zipName,
+                        size = "12.6 MB",
+                        category = FileCategory.ARCHIVES,
+                        dateModified = "Just now",
+                        path = "${getApplication<Application>().filesDir.absolutePath}/$zipName"
+                    )
+                    _managedFiles.value = listOf(zipFile) + _managedFiles.value
+                    _mayaState.value = MayaState.SUCCESS
+                    val msg = if (isBangla) "জিপ আর্কাইভ '$zipName' তৈরি করা হয়েছে।" else "Created compressed $zipName"
+                    _lastMayaResponse.value = msg
+                    speakMaya(msg)
+                    logTask(originalCommand, "FILE_ZIP", msg, true)
+                } else {
+                    _mayaState.value = MayaState.ERROR
+                    val err = if (isBangla) "জিপ তৈরি করা সম্ভব হয়নি।" else (result.exceptionOrNull()?.message ?: "Failed to create archive")
+                    _lastMayaResponse.value = err
+                    speakMaya(err)
+                    logTask(originalCommand, "FILE_ZIP", err, false, err)
+                }
             }
             "UNZIP" -> {
                 _mayaState.value = MayaState.SUCCESS
@@ -492,12 +501,20 @@ class MayaViewModel(application: Application) : AndroidViewModel(application) {
                 logTask(originalCommand, "FILE_MOVE", msg, true)
             }
             "SHARE" -> {
-                actionController.shareContent("Maya Share", "Sharing document from Maya Assistant")
-                _mayaState.value = MayaState.SUCCESS
-                val msg = if (isBangla) "ফাইল শেয়ারিং উইন্ডো খোলা হয়েছে।" else "Opening share dialog for file..."
-                _lastMayaResponse.value = msg
-                speakMaya(msg)
-                logTask(originalCommand, "FILE_SHARE", msg, true)
+                val result = actionController.shareContent("Maya Share", "Sharing document from Maya Assistant")
+                if (result.isSuccess) {
+                    _mayaState.value = MayaState.SUCCESS
+                    val msg = if (isBangla) "ফাইল শেয়ারিং উইন্ডো খোলা হয়েছে।" else "Opening share dialog for file..."
+                    _lastMayaResponse.value = msg
+                    speakMaya(msg)
+                    logTask(originalCommand, "FILE_SHARE", msg, true)
+                } else {
+                    _mayaState.value = MayaState.ERROR
+                    val err = if (isBangla) "শেয়ার করা সম্ভব হয়নি।" else (result.exceptionOrNull()?.message ?: "Share failed")
+                    _lastMayaResponse.value = err
+                    speakMaya(err)
+                    logTask(originalCommand, "FILE_SHARE", err, false, err)
+                }
             }
         }
         delay(1500)
@@ -551,6 +568,9 @@ class MayaViewModel(application: Application) : AndroidViewModel(application) {
 
     fun updateUserSettings(settings: UserSettings) {
         _userSettings.value = settings
+        viewModelScope.launch {
+            settingsRepository.saveSettings(settings)
+        }
         speechManager?.updateVoiceSettings(
             settings.voiceSpeed,
             settings.voicePitch,
@@ -599,18 +619,26 @@ class MayaViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun loginWithEmail(email: String, name: String) {
-        _userSettings.value = _userSettings.value.copy(
+        val updated = _userSettings.value.copy(
             isLoggedIn = true,
             userEmail = email,
             userName = name.ifBlank { "User" }
         )
+        _userSettings.value = updated
+        viewModelScope.launch {
+            settingsRepository.saveSettings(updated)
+        }
         _currentScreen.value = ScreenRoute.HOME
     }
 
     fun logout() {
-        _userSettings.value = _userSettings.value.copy(
+        val updated = _userSettings.value.copy(
             isLoggedIn = false
         )
+        _userSettings.value = updated
+        viewModelScope.launch {
+            settingsRepository.saveSettings(updated)
+        }
         _currentScreen.value = ScreenRoute.LOGIN
     }
 

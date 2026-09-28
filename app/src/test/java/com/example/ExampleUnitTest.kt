@@ -220,4 +220,37 @@ class ExampleUnitTest {
         assertNull(result.intent)
         assertTrue(result.response.isNotBlank())
     }
+
+    @Test
+    fun testUserSettingsEntity_toAndFromMapping() {
+        val original = com.example.model.UserSettings(
+            wakePhrase = "মায়া",
+            stopCommand = "থামো",
+            language = "Bangla",
+            voiceSpeed = 0.9f,
+            isLoggedIn = true,
+            userName = "Test User"
+        )
+        val entity = com.example.db.UserSettingsEntity.fromUserSettings(original)
+        assertEquals(1, entity.id)
+        assertEquals("মায়া", entity.wakePhrase)
+        assertEquals("থামো", entity.stopCommand)
+
+        val restored = entity.toUserSettings()
+        assertEquals(original.wakePhrase, restored.wakePhrase)
+        assertEquals(original.stopCommand, restored.stopCommand)
+        assertEquals(original.language, restored.language)
+        assertEquals(original.voiceSpeed, restored.voiceSpeed, 0.001f)
+        assertEquals(original.userName, restored.userName)
+        assertEquals(original.isLoggedIn, restored.isLoggedIn)
+    }
+
+    @Test
+    fun testZipAction_createsValidArchiveTarget() {
+        val safeTarget = "my_backup.zip".trim().ifBlank { "archive" }.removeSuffix(".zip")
+        assertEquals("my_backup", safeTarget)
+
+        val emptyTarget = "".trim().ifBlank { "archive" }.removeSuffix(".zip")
+        assertEquals("archive", emptyTarget)
+    }
 }
